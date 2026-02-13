@@ -1,17 +1,12 @@
 {
   "name": "local-buzzer-system-backend",
   "version": "1.0.0",
-  "description": "Backend server for Local Buzzer System",
-  "main": "dist/server/index.js",
+  "description": "Simple Backend server for Local Buzzer System",
+  "main": "src/index.js",
+  "type": "commonjs",
   "scripts": {
-    "dev": "tsx watch src/server/index.ts",
-    "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/server/index.js",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage",
-    "lint": "eslint src/**/*.ts",
-    "typecheck": "tsc --noEmit"
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
   },
   "keywords": [
     "game",
@@ -23,29 +18,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@types/mongoose": "^5.11.96",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "express-rate-limit": "^7.2.0",
-    "helmet": "^7.1.0",
-    "mongoose": "^9.2.1",
-    "socket.io": "^4.7.5",
-    "winston": "^3.13.0",
-    "winston-daily-rotate-file": "^5.0.0",
-    "zod": "^3.22.4"
+    "mongoose": "^8.2.1",
+    "socket.io": "^4.7.5"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.17",
-    "@types/express": "^4.17.21",
-    "@types/jest": "^29.5.12",
-    "@types/node": "^20.12.7",
-    "@types/supertest": "^6.0.2",
-    "jest": "^29.7.0",
-    "socket.io-client": "^4.8.3",
-    "supertest": "^6.3.4",
-    "ts-jest": "^29.1.2",
-    "tsx": "^4.7.2",
-    "typescript": "^5.4.5"
+    "nodemon": "^3.1.0",
+    "socket.io-client": "^4.8.3"
   }
 }

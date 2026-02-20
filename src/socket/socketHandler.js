@@ -65,7 +65,7 @@ module.exports = (io) => {
                     maxParticipants: maxParticipants || 10,
                     timerEnabled: !!timerEnabled,
                     timerDuration: timerDuration || 10,
-                    participants: [hostPlayer],
+                    participants: [], // Host is no longer a participant
                     isGameStarted: false,
                     isBuzzerLocked: false,
                     buzzResults: [],

@@ -1,143 +1,299 @@
-const User = require('../models/User');
 const Room = require('../models/Room');
 
-module.exports = (io) => {
-    io.on('connection', (socket) => {
-        console.log('New client connected:', socket.id);
+// Generate a random 6-character room code
+function generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+}
 
-        // Join Room
-        socket.on('join_room', async ({ username, roomCode, isHost }) => {
+// Convert a Mongoose Room document to a GameRoom object matching the frontend schema
+function toGameRoom(room) {
+    return {
+        code: room.code,
+        hostId: room.hostSocketId,
+        hostName: room.hostName,
+        maxParticipants: room.maxParticipants,
+        timerEnabled: room.timerEnabled,
+        timerDuration: room.timerDuration,
+        participants: room.participants || [],
+        isGameStarted: room.isGameStarted,
+        isBuzzerLocked: room.isBuzzerLocked,
+        buzzResults: room.buzzResults || [],
+        currentRound: room.currentRound,
+    };
+}
+
+module.exports = (io) => {
+    // Map of room code -> timer interval (for server-side countdown)
+    const timerMap = {};
+
+    io.on('connection', (socket) => {
+        console.log('[Socket] Client connected:', socket.id);
+
+        // ─── CREATE ROOM ───────────────────────────────────────────────────────
+        socket.on('createRoom', async ({ hostName, maxParticipants, timerEnabled, timerDuration }) => {
             try {
-                // Find or create room
-                let room = await Room.findOne({ roomCode });
+                // Generate unique room code
+                console.log('[Socket] Generating room code for', hostName);
+                let code;
+                let attempts = 0;
+                do {
+                    code = generateRoomCode();
+                    console.log(`[Socket] Attempt ${attempts + 1}: code ${code}`);
+                    attempts++;
+                } while (await Room.findOne({ code }) && attempts < 10);
+
+                console.log(`[Socket] Selected code: ${code}`);
+
+                // Create the host player object
+                const hostPlayer = {
+                    id: socket.id,
+                    name: hostName || 'Host',
+                    role: 'host',
+                    score: 0,
+                };
+
+                // Create room document
+                const room = new Room({
+                    code,
+                    hostSocketId: socket.id,
+                    hostName: hostName || 'Host',
+                    maxParticipants: maxParticipants || 10,
+                    timerEnabled: !!timerEnabled,
+                    timerDuration: timerDuration || 10,
+                    participants: [hostPlayer],
+                    isGameStarted: false,
+                    isBuzzerLocked: false,
+                    buzzResults: [],
+                    currentRound: 0,
+                });
+                await room.save();
+
+                socket.join(code);
+                socket.roomCode = code;
+
+                const gameRoom = toGameRoom(room);
+                socket.emit('roomCreated', gameRoom);
+                console.log(`[Socket] Room ${code} created by ${hostName}`);
+            } catch (err) {
+                console.error('[Socket] createRoom error:', err);
+                socket.emit('error', 'Could not create room');
+            }
+        });
+
+        // ─── JOIN ROOM ─────────────────────────────────────────────────────────
+        socket.on('joinRoom', async ({ code, playerName, teamName }) => {
+            try {
+                const room = await Room.findOne({ code });
                 if (!room) {
-                    if (isHost) {
-                        room = new Room({ roomCode, hostSocketId: socket.id });
-                        await room.save();
-                    } else {
-                        return socket.emit('error', 'Room does not exist');
-                    }
-                } else if (isHost) {
-                    // If host reconnects or a new host tries to join (simple logic: update host socket)
-                    room.hostSocketId = socket.id;
-                    await room.save();
+                    return socket.emit('error', 'Room not found. Check the room code.');
+                }
+                if (room.isGameStarted) {
+                    return socket.emit('error', 'Game has already started.');
+                }
+                if (room.participants.length >= room.maxParticipants) {
+                    return socket.emit('error', 'Room is full.');
                 }
 
-                // Create user
-                const newUser = new User({
-                    username,
-                    room: roomCode,
-                    isHost,
-                    socketId: socket.id
-                });
-                await newUser.save();
+                const newPlayer = {
+                    id: socket.id,
+                    name: playerName || 'Player',
+                    teamName: teamName || undefined,
+                    role: 'participant',
+                    score: 0,
+                };
 
-                socket.join(roomCode);
+                room.participants.push(newPlayer);
+                await room.save();
 
-                // Notify room
-                const users = await User.find({ room: roomCode });
-                io.to(roomCode).emit('room_users', users);
-                io.to(roomCode).emit('buzz_state', {
-                    isBuzzActive: room.isBuzzActive,
-                    buzzedUser: room.buzzedUser
-                });
+                socket.join(code);
+                socket.roomCode = code;
 
-                console.log(`${username} joined room ${roomCode}`);
+                const gameRoom = toGameRoom(room);
+
+                // Tell this socket the full updated room
+                socket.emit('roomUpdate', gameRoom);
+                // Tell all OTHER sockets in the room a player joined
+                socket.to(code).emit('playerJoined', newPlayer);
+                socket.to(code).emit('roomUpdate', gameRoom);
+
+                console.log(`[Socket] ${playerName} joined room ${code}`);
             } catch (err) {
-                console.error('Join room error:', err);
+                console.error('[Socket] joinRoom error:', err);
                 socket.emit('error', 'Could not join room');
             }
         });
 
-        // Buzz
-        socket.on('buzz', async ({ roomCode }) => {
+        // ─── START GAME ────────────────────────────────────────────────────────
+        socket.on('startGame', async (code) => {
             try {
-                const room = await Room.findOne({ roomCode });
-                if (room && room.isBuzzActive && !room.buzzedUser) {
-                    const user = await User.findOne({ socketId: socket.id });
-                    if (user) {
-                        room.buzzedUser = user.username;
-                        room.buzzedTimestamp = new Date();
-                        await room.save();
-
-                        io.to(roomCode).emit('buzz_state', {
-                            isBuzzActive: room.isBuzzActive,
-                            buzzedUser: room.buzzedUser
-                        });
-                        console.log(`${user.username} buzzed in room ${roomCode}`);
-                    }
+                const room = await Room.findOne({ code });
+                if (!room) return;
+                if (room.hostSocketId !== socket.id) {
+                    return socket.emit('error', 'Only the host can start the game.');
                 }
+
+                room.isGameStarted = true;
+                room.isBuzzerLocked = false;
+                room.currentRound = (room.currentRound || 0) + 1;
+                room.buzzResults = [];
+                await room.save();
+
+                const gameRoom = toGameRoom(room);
+                io.to(code).emit('gameStarted');
+                io.to(code).emit('roomUpdate', gameRoom);
+
+                // Start server-side timer if enabled
+                if (room.timerEnabled && room.timerDuration > 0) {
+                    // Clear any existing timer for this room
+                    if (timerMap[code]) {
+                        clearInterval(timerMap[code].interval);
+                        clearTimeout(timerMap[code].timeout);
+                    }
+
+                    let secondsLeft = room.timerDuration;
+                    io.to(code).emit('timerUpdate', secondsLeft);
+
+                    timerMap[code] = {};
+                    timerMap[code].interval = setInterval(() => {
+                        secondsLeft--;
+                        io.to(code).emit('timerUpdate', secondsLeft);
+                        if (secondsLeft <= 0) {
+                            clearInterval(timerMap[code].interval);
+                            io.to(code).emit('timerExpired');
+                        }
+                    }, 1000);
+                }
+
+                console.log(`[Socket] Game started in room ${code}, round ${room.currentRound}`);
             } catch (err) {
-                console.error('Buzz error:', err);
+                console.error('[Socket] startGame error:', err);
+                socket.emit('error', 'Could not start game');
             }
         });
 
-        // Toggle Buzz Active (Host Only)
-        socket.on('toggle_buzz', async ({ roomCode, isActive }) => {
+        // ─── PRESS BUZZER ──────────────────────────────────────────────────────
+        socket.on('pressBuzzer', async (code) => {
             try {
-                const room = await Room.findOne({ roomCode });
-                if (room) {
-                    // Verify host
-                    if (room.hostSocketId !== socket.id) {
-                        // Double check with user DB if socket ID matches host
-                        const user = await User.findOne({ socketId: socket.id });
-                        if (!user || !user.isHost) return;
-                    }
+                const room = await Room.findOne({ code });
+                if (!room) return;
+                if (!room.isGameStarted || room.isBuzzerLocked) return; // Already locked
 
-                    room.isBuzzActive = isActive;
-                    if (isActive) {
-                        room.buzzedUser = null; // Reset buzz when activating
-                    }
-                    await room.save();
+                const player = room.participants.find(p => p.id === socket.id);
+                if (!player) return;
 
-                    io.to(roomCode).emit('buzz_state', {
-                        isBuzzActive: room.isBuzzActive,
-                        buzzedUser: room.buzzedUser
-                    });
+                const buzzResult = {
+                    playerId: socket.id,
+                    playerName: player.name,
+                    teamName: player.teamName,
+                    timestamp: Date.now(),
+                };
+
+                room.isBuzzerLocked = true;
+                room.buzzResults.push(buzzResult);
+                await room.save();
+
+                // Stop timer if running
+                if (timerMap[code]) {
+                    clearInterval(timerMap[code].interval);
+                    clearTimeout(timerMap[code].timeout);
+                    delete timerMap[code];
                 }
+
+                const gameRoom = toGameRoom(room);
+                io.to(code).emit('buzzerLocked', buzzResult);
+                io.to(code).emit('roomUpdate', gameRoom);
+
+                console.log(`[Socket] ${player.name} buzzed in room ${code}`);
             } catch (err) {
-                console.error('Toggle buzz error:', err);
+                console.error('[Socket] pressBuzzer error:', err);
             }
         });
 
-        // Reset Buzz (Host Only)
-        socket.on('reset_buzz', async ({ roomCode }) => {
+        // ─── RESET BUZZER ──────────────────────────────────────────────────────
+        socket.on('resetBuzzer', async (code) => {
             try {
-                const room = await Room.findOne({ roomCode });
-                if (room) {
-                    // Verify host
-                    if (room.hostSocketId !== socket.id) {
-                        // Double check with user DB if socket ID matches host
-                        const user = await User.findOne({ socketId: socket.id });
-                        if (!user || !user.isHost) return;
-                    }
-
-                    room.buzzedUser = null;
-                    room.isBuzzActive = true; // Usually reset means "ready for next question"
-                    await room.save();
-
-                    io.to(roomCode).emit('buzz_state', {
-                        isBuzzActive: room.isBuzzActive,
-                        buzzedUser: room.buzzedUser
-                    });
+                const room = await Room.findOne({ code });
+                if (!room) return;
+                if (room.hostSocketId !== socket.id) {
+                    return socket.emit('error', 'Only the host can reset the buzzer.');
                 }
+
+                room.isBuzzerLocked = false;
+                await room.save();
+
+                const gameRoom = toGameRoom(room);
+                io.to(code).emit('buzzerReset');
+                io.to(code).emit('roomUpdate', gameRoom);
+
+                console.log(`[Socket] Buzzer reset in room ${code}`);
             } catch (err) {
-                console.error('Reset buzz error:', err);
+                console.error('[Socket] resetBuzzer error:', err);
             }
         });
 
-        // Disconnect
+        // ─── LEAVE ROOM ────────────────────────────────────────────────────────
+        socket.on('leaveRoom', async (code) => {
+            await handleLeave(socket, code, io, timerMap);
+        });
+
+        // ─── DISCONNECT ────────────────────────────────────────────────────────
         socket.on('disconnect', async () => {
-            console.log('Client disconnected:', socket.id);
-            try {
-                const user = await User.findOneAndDelete({ socketId: socket.id });
-                if (user) {
-                    const users = await User.find({ room: user.room });
-                    io.to(user.room).emit('room_users', users);
-                }
-            } catch (err) {
-                console.error('Disconnect error:', err);
+            console.log('[Socket] Client disconnected:', socket.id);
+            const code = socket.roomCode;
+            if (code) {
+                await handleLeave(socket, code, io, timerMap);
             }
         });
     });
 };
+
+// ─── SHARED LEAVE LOGIC ────────────────────────────────────────────────────────
+async function handleLeave(socket, code, io, timerMap) {
+    try {
+        const room = await Room.findOne({ code });
+        if (!room) return;
+
+        // Remove the player from participants
+        room.participants = room.participants.filter(p => p.id !== socket.id);
+
+        // If host left or room is empty, delete the room
+        if (room.hostSocketId === socket.id || room.participants.length === 0) {
+            // Stop timer
+            if (timerMap[code]) {
+                clearInterval(timerMap[code].interval);
+                clearTimeout(timerMap[code].timeout);
+                delete timerMap[code];
+            }
+            await Room.deleteOne({ code });
+            io.to(code).emit('roomClosed');
+            console.log(`[Socket] Room ${code} closed`);
+        } else {
+            await room.save();
+            const gameRoom = {
+                code: room.code,
+                hostId: room.hostSocketId,
+                hostName: room.hostName,
+                maxParticipants: room.maxParticipants,
+                timerEnabled: room.timerEnabled,
+                timerDuration: room.timerDuration,
+                participants: room.participants || [],
+                isGameStarted: room.isGameStarted,
+                isBuzzerLocked: room.isBuzzerLocked,
+                buzzResults: room.buzzResults || [],
+                currentRound: room.currentRound,
+            };
+            io.to(code).emit('playerLeft', socket.id);
+            io.to(code).emit('roomUpdate', gameRoom);
+            console.log(`[Socket] Player ${socket.id} left room ${code}`);
+        }
+
+        socket.leave(code);
+    } catch (err) {
+        console.error('[Socket] handleLeave error:', err);
+    }
+}

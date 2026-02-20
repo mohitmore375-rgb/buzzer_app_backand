@@ -137,6 +137,16 @@ module.exports = (io) => {
                     return socket.emit('error', 'Only the host can start the game.');
                 }
 
+                // Award point to the first player who buzzed in the previous round
+                if (room.buzzResults && room.buzzResults.length > 0) {
+                    const winnerId = room.buzzResults[0].playerId;
+                    const winnerIndex = room.participants.findIndex(p => p.id === winnerId);
+                    if (winnerIndex !== -1) {
+                        room.participants[winnerIndex].score += 1;
+                        console.log(`[Socket] Point awarded to ${room.participants[winnerIndex].name}. New score: ${room.participants[winnerIndex].score}`);
+                    }
+                }
+
                 room.isGameStarted = true;
                 room.isBuzzerLocked = false;
                 room.currentRound = (room.currentRound || 0) + 1;
